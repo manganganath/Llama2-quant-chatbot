@@ -57,12 +57,11 @@
 # MAGIC   transformers==4.31.0 \
 # MAGIC   accelerate==0.21.0 \
 # MAGIC   mlflow==2.5.0 \
-# MAGIC   bitsandbytes==0.41.0 \
-# MAGIC   huggingface_hub
+# MAGIC   bitsandbytes==0.41.0 
 
 # COMMAND ----------
 
-# MAGIC %run ./_resources/00-init $catalog=hive_metastore $db=llama2_quant_chatbot
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -122,7 +121,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Review our raw Q&A dataset
-quant_raw_path = demo_path+"/quant/raw"
+quant_raw_path = "/dbdemos/product/llm/quant/raw"
 print(f"loading raw xml dataset under {quant_raw_path}")
 raw_quant = spark.read.format("xml").option("rowTag", "row").load(f"{quant_raw_path}/Posts.xml")
 display(raw_quant)
@@ -130,6 +129,7 @@ display(raw_quant)
 # COMMAND ----------
 
 from bs4 import BeautifulSoup
+from pyspark.sql.functions import col, udf, length, pandas_udf
 
 #UDF to transform html content as text
 @pandas_udf("string")
@@ -144,13 +144,15 @@ quant_df =(raw_quant
                   .select("id", "body", "parent_id"))
 
 # Save 'raw' content for later loading of questions
-quant_df.write.mode("overwrite").saveAsTable(f"quant_dataset")
-display(spark.table("quant_dataset"))
+quant_df.write.mode("overwrite").saveAsTable(f"nuwan.quant.quant_dataset")
+display(spark.table("nuwan.quant.quant_dataset"))
 
 # COMMAND ----------
 
 # DBTITLE 1,Assemble questions and answers
-quant_df = spark.table("quant_dataset")
+import pyspark.sql.functions as F
+
+quant_df = spark.table("nuwan.quant.quant_dataset")
 
 # Self-join to assemble questions and answers
 qa_df = quant_df.alias("a").filter("parent_id IS NULL") \
@@ -197,8 +199,17 @@ def summarize(iterator: Iterator[pd.Series]) -> Iterator[pd.Series]:
 
 # We won't run it as this can take some time in the entire dataset. In this demo we set repartition to 1 as we just have 1 GPU by default.
 # docs_df = docs_df.repartition(1).withColumn("text_short", summarize("text"))
-docs_df.write.mode("overwrite").option("mergeSchema", "true").saveAsTable(f"quant_training_dataset")
-display(spark.table("quant_training_dataset"))
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Write processed to a Delta table
+docs_df.write.mode("overwrite").option("mergeSchema", "true").saveAsTable(f"nuwan.quant.quant_training_dataset")
+display(spark.table("nuwan.quant.quant_training_dataset"))
+
+# COMMAND ----------
+
+## Delete below cells if vector search works
 
 # COMMAND ----------
 
@@ -285,10 +296,9 @@ dbutils.library.restartPython()
 # MAGIC
 # MAGIC ## That's it, our Q&A dataset is ready.
 # MAGIC
-# MAGIC In this notebook, we leverage Databricks to prepare our Q&A dataset:
-# MAGIC
-# MAGIC * Ingesting & cleaning our dataset
-# MAGIC * Preparing our embeddings and saving them in chroma
-# MAGIC
-# MAGIC We're now ready to use this dataset to improve our prompt context and build our quant Chat Bot! 
-# MAGIC Open the next notebook [03-Q&A-prompt-engineering-for-dolly]($./03-Q&A-prompt-engineering-for-dolly)
+# MAGIC In this notebook, we leverage Databricks to prepare our Q&A dataset. We're now ready to leverage Databricks Vector Search for preparing our embeddings for this dataset and doing similarity search.
+# MAGIC Open the next notebook [02-Vector-indexing]($./02-Vector-indexing).
+
+# COMMAND ----------
+
+

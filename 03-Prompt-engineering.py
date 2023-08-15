@@ -48,13 +48,18 @@
 # MAGIC   xformers==0.0.20 \
 # MAGIC   transformers==4.31.0 \
 # MAGIC   accelerate==0.21.0 \
-# MAGIC   mlflow==2.5.0 \
+# MAGIC   mlflow==2.6.0 \
 # MAGIC   bitsandbytes==0.41.0 \
-# MAGIC   huggingface_hub
+# MAGIC   huggingface_hub \
+# MAGIC   databricks-vectorsearch-preview 
 
 # COMMAND ----------
 
-# MAGIC %run ./_resources/00-init $catalog=hive_metastore $db=dbdemos_llm_quant
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# MAGIC %run ./_resources/00-init $catalog=nuwan $db=quant
 
 # COMMAND ----------
 
@@ -74,19 +79,11 @@ notebook_login()
 # COMMAND ----------
 
 # DBTITLE 0,Create our vector database connection for context
-# Start here to load a previously-saved DB
 from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
+from databricks.vector_search.client import VectorSearchClient
+vs_client = VectorSearchClient()
 
-if len(get_available_gpus()) == 0:
-  Exception("Running dolly without GPU will be slow. We recommend you switch to a Single Node cluster with at least 1 GPU to properly run this demo.")
-
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-
-quant_vector_db_path = "/dbfs"+demo_path+"/quant_vector_db"
-hf_embed = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
-chroma_db = Chroma(collection_name="quant_docs", embedding_function=hf_embed, persist_directory=quant_vector_db_path)
+index_name="vs_catalog.demo.quant_qna_index"
 
 # COMMAND ----------
 
@@ -103,6 +100,7 @@ from langchain import PromptTemplate
 from langchain.llms import HuggingFacePipeline
 from langchain.chains.question_answering import load_qa_chain
 from langchain.memory import ConversationSummaryBufferMemory
+from langchain.docstore.document import Document
 
 def build_qa_chain():
   torch.cuda.empty_cache()
@@ -184,9 +182,8 @@ def build_qa_chain():
 # COMMAND ----------
 
 class ChatBot():
-  def __init__(self, db):
+  def __init__(self):
     self.reset_context()
-    self.db = db
 
   def reset_context(self):
     self.sources = []
@@ -196,12 +193,22 @@ class ChatBot():
     displayHTML("<h1>Hi! I'm your quant bot. How Can I help you today?</h1>")
 
   def get_similar_docs(self, question, similar_doc_count):
-    return self.db.similarity_search(question, k=similar_doc_count)
+    docs = list()
+    result = vs_client.similarity_search(
+        index_name = index_name,
+        query_text = question,
+        columns = ["source", "text"],
+        num_results = similar_doc_count)
+    
+    for i in range(0, similar_doc_count):
+      docs.append(Document(page_content=result['result']['data_array'][i][1][1:-3], metadata={"source": int(result['result']['data_array'][i][0][1:-1])}))
+
+    return docs
 
   def chat(self, question):
     # Keep the last 3 discussion to search similar content
     self.discussion.append(question)
-    similar_docs = self.get_similar_docs(" \n".join(self.discussion[-3:]), similar_doc_count=3)
+    similar_docs = self.get_similar_docs(" \n".join(self.discussion[-3:]), similar_doc_count=2)
     # Remove similar doc if they're already in the last questions (as it's already in the history)
     similar_docs = [doc for doc in similar_docs if doc.metadata['source'] not in self.sources[-3:]]
 
@@ -217,7 +224,7 @@ class ChatBot():
       result_html += f"<p><blockquote>{d.page_content}<br/>(Source: <a href=\"https://quant.stackexchange.com/a/{source_id}\">{source_id}</a>)</blockquote></p>"
     displayHTML(result_html)
 
-chat_bot = ChatBot(chroma_db)
+chat_bot = ChatBot()
 
 # COMMAND ----------
 
@@ -234,77 +241,6 @@ chat_bot.chat("What are the assumptions it makes?")
 
 # COMMAND ----------
 
-# MAGIC %md 
-# MAGIC
-# MAGIC
-# MAGIC
-# MAGIC ## Extra: Deploying a langchain pipeline in production with MLFlow (requires DBRML 13+)
-# MAGIC
-# MAGIC Once our bot is ready, we can package our pipeline using MLflow and the langchain flavor: 
-
-# COMMAND ----------
-
-# DBTITLE 1,Deploying our chat bot to MLFlow
-def publish_model_to_mlflow():
-  # Build our langchain pipeline
-  langchain_model = build_qa_chain()
-
-  with mlflow.start_run() as run:
-      # Save model to MLFlow
-      # Note that this only saves the langchain pipeline (we could also add the ChatBot with a custom Model Wrapper class)
-      # See https://mlflow.org/docs/latest/models.html#custom-python-models for an example
-      # The vector database lives outside of your model
-      
-      #Note: for now only LLMChain model are supported, qaChain will be added soon
-      mlflow.langchain.log_model(langchain_model, artifact_path="model")
-      model_registered = mlflow.register_model(f"runs:/{run.info.run_id}/model", "quant-bot")
-
-  # Move the model in production
-  client = mlflow.tracking.MlflowClient()
-  print("registering model version "+model_registered.version+" as production model")
-  client.transition_model_version_stage("quant-bot", model_registered.version, stage = "Production", archive_existing_versions=True)
-
-def load_model_and_answer(similar_docs, question): 
-  # Note: this will load the model once more in memory
-  # Load the langchain pipeline & run inferences
-  chain = mlflow.pyfunc.load_model(model_uri)
-  chain.predict({"input_documents": similar_docs, "human_input": question})
-
-# COMMAND ----------
-
-# Make sure you restart the python kernel to free our gpu memory if you're using multiple notebooks0
-# (load the model only once in 1 single notebook to avoid OOM)
-# dbutils.library.restartPython()
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC
 # MAGIC ## Our chatbot is ready!
-# MAGIC
-# MAGIC That's it, you're ready to deploy your chatbot!
-# MAGIC
-# MAGIC ### Conclusion
-# MAGIC
-# MAGIC In this demo, we've seen a basic prompt engineering solution using history memory. More advanced solution can be build to provide better context.
-# MAGIC
-# MAGIC Having a good training dataset is key to improve our model performance and load better context. Collecting and preparing high quality data is likely the most important part to a successful bot!
-# MAGIC
-# MAGIC A good way to improve your dataset is to capture your user questions and chat, and incrementally improve your Q&A dataset.  <br/>
-# MAGIC As example, `langchain` is especially build to work well with a chat bot trained with a dataset similar to OpenAI's, which isn't exactly matching Dolly's. The closest your prompt is engineered to match your training dataset content, the better your bot will behave.
-# MAGIC
-# MAGIC *A note on inference speed: As we load big models, inference time can be greatly optimized compiling our transformer models. Here is a quick example using onnx:*
-# MAGIC
-# MAGIC `%pip install -U transformers langchain chromadb accelerate bitsandbytes protobuf==3.19.0 optimum onnx onnxruntime-gpu`
-# MAGIC
-# MAGIC `%sh optimum-cli export onnx --model databricks/dolly-v2-7b  --device cuda --optimize O4 dolly_v2_7b_onnx`
-# MAGIC
-# MAGIC ```
-# MAGIC from optimum.onnxruntime import ORTModelForCausalLM
-# MAGIC
-# MAGIC # Use Dolly as main model
-# MAGIC model_name = "databricks/dolly-v2-3b" # can use dolly-v2-3b, dolly-v2-7b or dolly-v2-12b for smaller model and faster inferences.
-# MAGIC tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-# MAGIC model = ORTModelForCausalLM.from_pretrained("databricks/dolly-v2-3b", export=True, provider="CUDAExecutionProvider")
-# MAGIC ```
-# MAGIC *You could also leverage FasterTransformer. Contact your Databricks team for more details*

@@ -12,4 +12,5 @@ We will split this demo in 2 sections:
 - 2/ **Q&A inference**: leverage Llama 2 to answer our query, leveraging our Q&A as extra context for Dolly. This is also known as Prompt Engineering.
 
 
-<img style="margin: auto; display: block" width="1200px" src="https://raw.githubusercontent.com/databricks-demos/dbdemos-resources/main/images/product/llm-dolly/llm-dolly-full.png">
+<img style="margin: auto; display: block" width="1200px" src="https://raw.githubusercontent.com/nuwan-db/Llama2-quant-chatbot
+/_images/overview.png">

@@ -1,19 +1,16 @@
 # Databricks notebook source
 # MAGIC %md-sandbox
-# MAGIC # Chat Bot with langchain and Dolly
+# MAGIC # Chat Bot with langchain and Llama2
 # MAGIC
-# MAGIC ## Chat Bot Prompt engineering
+# MAGIC ## Prompt engineering
 # MAGIC
-# MAGIC In this example, we will improve our previous Q&A to create a chat bot.
-# MAGIC
-# MAGIC The main thing we'll be adding is a memory between the different question so that our bot can answer having the context of the previous Q&A.
-# MAGIC
-# MAGIC
-# MAGIC <img style="float:right" width="800px" src="https://raw.githubusercontent.com/databricks-demos/dbdemos-resources/main/images/product/llm-dolly/llm-dolly-chatbot.png">
+# MAGIC Prompt engineering is a technique used to wrap the given user question with more information to better guide the model in its anwser. Prompt engineering would typically involve:
+# MAGIC - Guidance on how to answer given the usage (*ex: You are a quant and your job is to help providing the best answer*)
+# MAGIC - Extra context to help your model. For example similar text close to the user question (*ex: Knowing that [Content from your internal Q&A], please answer...*)
+# MAGIC - Specific instruction in the answer (*ex: Answer in Italian*) 
+# MAGIC - Information on the previous questions to keep a context if you're building a chat bot (compressed as embedding)
 # MAGIC
 # MAGIC ### Keeping memory between multiple questions
-# MAGIC
-# MAGIC The main challenge for our chat bot is that we won't be able to use the entire discussion history as context to send to dolly. 
 # MAGIC
 # MAGIC First of all this is expensive, but more importantly this won't support long discussion as we'll endup with a text longer than our max window size for our mdoel.
 # MAGIC
@@ -21,24 +18,6 @@
 # MAGIC
 # MAGIC We will use an intermediate summarization task to do that, using `ConversationSummaryMemory` from `langchain`.
 # MAGIC
-# MAGIC
-# MAGIC **Note: This is a more advanced content, we recommend you start with the Previous notebook: 03-Q&A-prompt-engineering-for-dolly**
-# MAGIC
-# MAGIC <!-- Collect usage data (view). Remove it to disable collection. View README for more details.  -->
-# MAGIC <img width="1px" src="https://www.google-analytics.com/collect?v=1&gtm=GTM-NKQ8TT7&tid=UA-163989034-1&aip=1&t=event&ec=dbdemos&ea=VIEW&dp=%2F_dbdemos%2Fdata-science%2Fllm-dolly-chatbot%2F04-chat-bot-prompt-engineering-dolly&cid=1444828305810485&uid=4656226177354106">
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Cluster Setup
-# MAGIC
-# MAGIC - Run this on a cluster with Databricks Runtime 13.0 ML GPU. It should work on 12.2 ML GPU as well.
-# MAGIC - To run this notebook's examples _without_ distributed Spark inference at the end, all that is needed is a single-node 'cluster' with a GPU
-# MAGIC   - A10 and V100 instances should work, and this example is designed to fit the model in their working memory at some cost to quality
-# MAGIC   - A100 instances work best, and perform better with minor modifications commented below
-# MAGIC - To run the examples using distributed Spark inference at the end, provision a cluster of GPUs (and change the repartitioning at the end to match GPU count)
-# MAGIC
-# MAGIC *Note that `bitsandbytes` is not needed if running on A100s and the code is modified per comments below to not load in 8-bit.*
 
 # COMMAND ----------
 
@@ -188,7 +167,7 @@ class ChatBot():
   def reset_context(self):
     self.sources = []
     self.discussion = []
-    # Building the chain will load Dolly and can take some time depending on the model size and your GPU
+    # Building the chain will load Llama2 and can take some time depending on the model size and your GPU
     self.qa_chain = build_qa_chain()
     displayHTML("<h1>Hi! I'm your quant bot. How Can I help you today?</h1>")
 

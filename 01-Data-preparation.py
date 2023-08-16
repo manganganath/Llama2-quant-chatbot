@@ -1,67 +1,12 @@
 # Databricks notebook source
 # MAGIC %md-sandbox
-# MAGIC # Dolly: data Preparation & Vector database creation with Databricks Lakehouse
-# MAGIC
-# MAGIC <img style="float: right" width="600px" src="https://raw.githubusercontent.com/databricks-demos/dbdemos-resources/main/images/product/llm-dolly/llm-dolly-data-prep-small.png">
+# MAGIC # Data preparation
 # MAGIC
 # MAGIC To be able to specialize our mode, we need a list of Q&A that we'll use as training dataset.
 # MAGIC
 # MAGIC For this demo, we'll specialize our model using Stack Exchange dataset. 
 # MAGIC
 # MAGIC Let's start with a simple data pipeline ingesting the Stack Exchange dataset, running some cleanup & saving it for further training.
-# MAGIC
-# MAGIC We will implement the following steps: <br><br>
-# MAGIC
-# MAGIC <style>
-# MAGIC .right_box{
-# MAGIC   margin: 30px; box-shadow: 10px -10px #CCC; width:650px; height:300px; background-color: #1b3139ff; box-shadow:  0 0 10px  rgba(0,0,0,0.6);
-# MAGIC   border-radius:25px;font-size: 35px; float: left; padding: 20px; color: #f9f7f4; }
-# MAGIC .badge {
-# MAGIC   clear: left; float: left; height: 30px; width: 30px;  display: table-cell; vertical-align: middle; border-radius: 50%; background: #fcba33ff; text-align: center; color: white; margin-right: 10px; margin-left: -35px;}
-# MAGIC .badge_b { 
-# MAGIC   margin-left: 25px; min-height: 32px;}
-# MAGIC </style>
-# MAGIC
-# MAGIC
-# MAGIC <div style="margin-left: 20px">
-# MAGIC   <div class="badge_b"><div class="badge">1</div> Download raw Q&A dataset</div>
-# MAGIC   <div class="badge_b"><div class="badge">2</div> Clean & prepare our quantitative finance questions and best answers</div>
-# MAGIC   <div class="badge_b"><div class="badge">3</div> Use a Sentence 2 Vect model to transform our docs in a vector</div>
-# MAGIC   <div class="badge_b"><div class="badge">4</div> Index the vector in our Vector database (Chroma)</div>
-# MAGIC </div>
-# MAGIC <br/>
-# MAGIC
-# MAGIC <!-- Collect usage data (view). Remove it to disable collection. View README for more details.  -->
-# MAGIC <img width="1px" src="https://www.google-analytics.com/collect?v=1&gtm=GTM-NKQ8TT7&tid=UA-163989034-1&aip=1&t=event&ec=dbdemos&ea=VIEW&dp=%2F_dbdemos%2Fdata-science%2Fllm-dolly-chatbot%2F02-Data-preparation&cid=1444828305810485&uid=4656226177354106">
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Cluster Setup
-# MAGIC
-# MAGIC - Run this on a cluster with Databricks Runtime 13.0 ML GPU. It should work on 12.2 ML GPU as well.
-# MAGIC - To run this notebook's examples _without_ distributed Spark inference at the end, all that is needed is a single-node 'cluster' with a GPU
-# MAGIC   - A10 and V100 instances should work, and this example is designed to fit the model in their working memory at some cost to quality
-# MAGIC   - A100 instances work best, and perform better with minor modifications commented below
-# MAGIC - To run the examples using distributed Spark inference at the end, provision a cluster of GPUs (and change the repartitioning at the end to match GPU count)
-# MAGIC
-# MAGIC *Note that `bitsandbytes` is not needed if running on A100s and the code is modified per comments below to not load in 8-bit.*
-
-# COMMAND ----------
-
-# DBTITLE 0,Install our vector database
-# MAGIC %pip install -U \
-# MAGIC   chromadb==0.3.22 \
-# MAGIC   langchain==0.0.260 \
-# MAGIC   xformers==0.0.20 \
-# MAGIC   transformers==4.31.0 \
-# MAGIC   accelerate==0.21.0 \
-# MAGIC   mlflow==2.5.0 \
-# MAGIC   bitsandbytes==0.41.0 
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -166,123 +111,9 @@ display(docs_df)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC
-# MAGIC ### Adding a shorter version to speedup our inference 
-# MAGIC
-# MAGIC Our Dataset is now composed of one question followed by the best answers.
-# MAGIC
-# MAGIC A potential issue is that this can be a fairly long text. Using long text as context can slow down LLM inference. One option is to summarize these Q&A using a summarizer LLM and save back the result as a new field.
-# MAGIC
-# MAGIC This operation can take some time, this is why we'll do it once in our data preparation pipeline so that we don't have to summarize our Q&A during the inference.
-
-# COMMAND ----------
-
-# DBTITLE 1,Adding a summary of our data
-from typing import Iterator
-import pandas as pd 
-from transformers import pipeline
-
-@pandas_udf("string")
-def summarize(iterator: Iterator[pd.Series]) -> Iterator[pd.Series]:
-    # Load the model for summarization
-    torch.cuda.empty_cache()
-    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6", device_map="auto")
-    def summarize_txt(text):
-      if len(text) > 5000:
-        return summarizer(text)[0]['summary_text']
-      return text
-
-    for serie in iterator:
-        # get a summary for each row
-        yield serie.apply(summarize_txt)
-
-# We won't run it as this can take some time in the entire dataset. In this demo we set repartition to 1 as we just have 1 GPU by default.
-# docs_df = docs_df.repartition(1).withColumn("text_short", summarize("text"))
-
-
-# COMMAND ----------
-
 # DBTITLE 1,Write processed to a Delta table
 docs_df.write.mode("overwrite").option("mergeSchema", "true").saveAsTable(f"nuwan.quant.quant_training_dataset")
 display(spark.table("nuwan.quant.quant_training_dataset"))
-
-# COMMAND ----------
-
-## Delete below cells if vector search works
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3/ Load our model to transform our docs to embeddings
-# MAGIC
-# MAGIC We will simply load a sentence to embedding model from hugging face and use it later in the chromadb client.
-
-# COMMAND ----------
-
-from langchain.embeddings import HuggingFaceEmbeddings
-
-# Download model from Hugging face
-hf_embed = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC ## 4/ Index the documents (rows) in our vector database
-# MAGIC
-# MAGIC Now it's time to load the texts that have been generated, and create a searchable database of text for use in the `langchain` pipeline. <br>
-# MAGIC These documents are embedded, so that later queries can be embedded too, and matched to relevant text chunks by embedding.
-# MAGIC
-# MAGIC - Collect the text chunks with Spark; `langchain` also supports reading chunks directly from Word docs, GDrive, PDFs, etc.
-# MAGIC - Create a simple in-memory Chroma vector DB for storage
-# MAGIC - Instantiate an embedding function from `sentence-transformers`
-# MAGIC - Populate the database and save it
-
-# COMMAND ----------
-
-# DBTITLE 1,Prepare our database storage location (in dbfs)
-# Prepare a directory to store the document database. Any path on `/dbfs` will do.
-dbutils.widgets.dropdown("reset_vector_database", "false", ["false", "true"], "Recompute embeddings for chromadb")
-quant_vector_db_path = demo_path+"/quant_vector_db"
-
-# Don't recompute the embeddings if the're already available
-compute_embeddings = dbutils.widgets.get("reset_vector_database") == "true" or is_folder_empty(quant_vector_db_path)
-
-if compute_embeddings:
-  print(f"creating folder {quant_vector_db_path} under our blob storage (dbfs)")
-  dbutils.fs.rm(quant_vector_db_path, True)
-  dbutils.fs.mkdirs(quant_vector_db_path)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC Create the document database:
-# MAGIC - Just collect the relatively small dataset of text and form `Document`s; `langchain` can also form doc collections directly from PDFs, GDrive files, etc
-# MAGIC - Split long texts into manageable chunks
-
-# COMMAND ----------
-
-from langchain.docstore.document import Document
-from langchain.vectorstores import Chroma
-
-all_texts = spark.table("quant_training_dataset")
-
-print(f"Saving document embeddings under /dbfs{quant_vector_db_path}")
-
-if compute_embeddings: 
-  # Transform our rows as langchain Documents
-  # If you want to index shorter term, use the text_short field instead
-  documents = [Document(page_content=r["text"], metadata={"source": r["source"]}) for r in all_texts.collect()]
-
-  # If your texts are long, you may need to split them. However it's best to summarize them instead as show above.
-  # text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=100)
-  # documents = text_splitter.split_documents(documents)
-
-  # Init the chroma db with the sentence-transformers/all-mpnet-base-v2 model loaded from hugging face  (hf_embed)
-  db = Chroma.from_documents(collection_name="quant_docs", documents=documents, embedding=hf_embed, persist_directory="/dbfs"+quant_vector_db_path)
-  db.similarity_search("dummy") # tickle it to persist metadata (?)
-  db.persist()
 
 # COMMAND ----------
 
